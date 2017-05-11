@@ -47,38 +47,46 @@ data ExecutionState =
 
 replMain :: IO ()
 replMain = do
-    _ <- runStateT runRepl (ReplState Nothing [])
+    _ <- runStateT runRepl (ReplState Nothing [] 0)
     return ()
 
 data ReplState = ReplState { containerId :: Maybe String
                            , replDockerfile :: Dockerfile
+                           , replInstructionCount :: Int
                            }
 type ReplM m = (MonadError IOException m, MonadBaseControl IO m, MonadState ReplState m, MonadIO m)
 
 data ReplCommand = ReplCommandDockerfile
                  | ReplCommandExit
+                 | ReplCommandFlush
                  | ReplCommandEOL
                  | ReplCommandInstruction InstructionPos
 
 runRepl :: ReplM m => m ()
 runRepl = do
   run `catchError` (\e -> liftIO (print e))
+  modify (\s -> s { replInstructionCount = replInstructionCount s + 1 })
   runRepl
   where
     run = readCommand >>= executeCommand
     readCommand :: ReplM m => m ReplCommand
     readCommand = do
+      iCount <- replInstructionCount <$> get
       ln <-
         liftIO $ do
-          putStr "> "
+          putStrLn ""
+          putStr ("  [" <> show iCount <> "] ")
           hFlush stdout
-          getLine
-      let einstructions = Dockerfile.parseString ln
+          ln <- getLine
+          putStrLn ""
+          return ln
+      let einstructions = Dockerfile.parseString (ln)
       case einstructions of
         Left err -> do
             liftIO $ print err
             case ln of
               "DOCKERFILE" -> return ReplCommandDockerfile
+              "FLUSH" -> return ReplCommandFlush
               "EXIT" -> return ReplCommandExit
               _ -> return (ReplCommandInstruction (InstructionPos (Run (words ln)) "Dockerfile" 0))
         Right (i:_) -> do
@@ -98,6 +106,10 @@ runRepl = do
                   callProcess "docker" ["stop", i]
                   callProcess "docker" ["rm", i]
           _ -> return ()
+    executeCommand ReplCommandFlush = do
+      state <- replDockerfile <$> get
+      let df = prettyPrint state
+      liftIO $ writeFile "./Dockerfile" df
     executeCommand ReplCommandDockerfile = do
       state <- replDockerfile <$> get
       liftIO $ putStrLn (prettyPrint state)
