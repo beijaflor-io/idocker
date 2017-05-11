@@ -1,11 +1,14 @@
 {-# LANGUAGE FlexibleContexts  #-}
-{-# LANGUAGE ScopedTypeVariables  #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ConstraintKinds  #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes       #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Main where
 
 import Control.Monad.Trans.Control
+import Control.Exception (IOException(..), SomeException(..))
+import Control.Monad.Except
 import System.Process
 import           Control.Concurrent.Lifted
 import           Control.Lens
@@ -35,9 +38,8 @@ import           System.ZMQ4.Monadic
 
 import           Configuration
 
-initialize :: IO (Maybe Configuration)
-initialize = do
-    [connectionFile] <- getArgs
+initialize :: [String] -> IO (Maybe Configuration)
+initialize (connectionFile:_) = do
     Aeson.decode <$> (ByteStringL.readFile connectionFile)
 
 data ExecutionState =
@@ -45,57 +47,99 @@ data ExecutionState =
 
 replMain :: IO ()
 replMain = do
-    _ <- runStateT runRepl Nothing
+    _ <- runStateT runRepl (ReplState Nothing [])
     return ()
 
-type ReplState = Maybe (Handle, Handle, Handle, ProcessHandle)
+data ReplState = ReplState { containerId :: Maybe String
+                           , replDockerfile :: Dockerfile
+                           }
+type ReplM m = (MonadError IOException m, MonadBaseControl IO m, MonadState ReplState m, MonadIO m)
 
-runRepl :: (MonadBaseControl IO m, MonadState ReplState m, MonadIO m) => m ()
+data ReplCommand = ReplCommandDockerfile
+                 | ReplCommandExit
+                 | ReplCommandEOL
+                 | ReplCommandInstruction InstructionPos
+
+runRepl :: ReplM m => m ()
 runRepl = do
-  ln <-
-    liftIO $ do
-      putStr "> "
-      hFlush stdout
-      getLine
-  let einstructions = Dockerfile.parseString ln
-  case einstructions of
-    Left err -> liftIO $ print err
-    Right instructions ->
-      forM_ instructions $ \(Dockerfile.InstructionPos instruction _ _) -> do
-        liftIO $ print instruction
-        executeInstruction instruction
+  run `catchError` (\e -> liftIO (print e))
   runRepl
   where
-    executeInstruction :: (MonadBaseControl IO m, MonadState ReplState m, MonadIO m) => Instruction -> m ()
-    executeInstruction i =
+    run = readCommand >>= executeCommand
+    readCommand :: ReplM m => m ReplCommand
+    readCommand = do
+      ln <-
+        liftIO $ do
+          putStr "> "
+          hFlush stdout
+          getLine
+      let einstructions = Dockerfile.parseString ln
+      case einstructions of
+        Left err -> do
+            liftIO $ print err
+            case ln of
+              "DOCKERFILE" -> return ReplCommandDockerfile
+              "EXIT" -> return ReplCommandExit
+              _ -> return (ReplCommandInstruction (InstructionPos (Run (words ln)) "Dockerfile" 0))
+        Right (i:_) -> do
+          return (ReplCommandInstruction i)
+        _ -> return ReplCommandEOL
+    executeCommand :: ReplM m => ReplCommand -> m ()
+    executeCommand (ReplCommandInstruction i) = do
+      modify (\s -> s { replDockerfile = replDockerfile s ++ [i] })
+      executeInstruction i
+    executeCommand ReplCommandEOL = return ()
+    executeCommand ReplCommandExit = do
+      mcontainerId <- containerId <$> get
+      case mcontainerId of
+          Just i ->
+              liftIO $ do
+                  putStrLn "Exiting..."
+                  callProcess "docker" ["stop", i]
+                  callProcess "docker" ["rm", i]
+          _ -> return ()
+    executeCommand ReplCommandDockerfile = do
+      state <- replDockerfile <$> get
+      liftIO $ putStrLn (prettyPrint state)
+    executeInstruction :: ReplM m => InstructionPos -> m ()
+    executeInstruction (InstructionPos i _ _) =
       case i of
         From (UntaggedImage img) -> do
-          state <- get
+          state <- containerId <$> get
           case state of
             Nothing -> do
-              (Just hin, Just hout, Just herr, ph) <-
-                liftIO $
-                createProcess
-                  (proc "docker" ["run", "-it", img])
-                  { std_out = CreatePipe
-                  , std_err = CreatePipe
-                  , std_in = CreatePipe
-                  }
-              fork $ forever $ liftIO $ do
-                  errLine <- hGetLine herr
-                  hPutStrLn stderr errLine
-              fork $ forever $ liftIO $ do
-                  outLine <- hGetLine hout
-                  putStrLn outLine
-              put (Just (hin, hout, herr, ph))
-            Just (_, _, _, ph) -> error "Process running"
-        Run args -> undefined
+              containerId <- (head . lines) <$>
+                (liftIO $ readProcess "docker" ["run", "-dit", img] "")
+              liftIO (putStrLn ("Started: " <> containerId))
+              modify (\s -> s { containerId = (Just containerId) })
+            Just containerId -> error "Process running"
+        Run args -> do
+          state <- containerId <$> get
+          case state of
+            Just containerId -> do
+              liftIO $ callProcess "docker" (["exec", containerId] ++ args)
+            Nothing -> error "Please start a container"
+        Add src dest -> do
+          state <- containerId <$> get
+          case state of
+            Just containerId -> do
+              liftIO $ callProcess "docker" (["cp", src, containerId <> ":" <> dest])
+            Nothing -> error "Please start a container"
+        _ -> liftIO $ putStrLn "Not implemented"
 
 main :: IO ()
 main = do
+    as <- getArgs
+    case as of
+        ("repl":_) -> replMain
+        ("ipython":as) -> ipythonMain as
+        _ -> error "Usage: idocker (repl|ipython) ...args"
+
+ipythonMain :: [String] -> IO ()
+ipythonMain args = do
   hSetBuffering stdout LineBuffering
   hSetBuffering stderr LineBuffering
-  Just cnf@Configuration {..} <- initialize
+  Just cnf@Configuration {..} <- initialize args
   print cnf
   runZMQ $ do
     let buildAddr port = "tcp://" <> Text.unpack ip <> ":" <> show port

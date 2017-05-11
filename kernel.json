@@ -2,6 +2,7 @@
   "display_name": "Docker",
   "argv": [
     "/Users/yamadapc/Library/Jupyter/kernels/docker/.stack-work/install/x86_64-osx/lts-8.13/8.0.2/bin/ipython-docker",
+    "ipython",
     "{connection_file}"
   ],
   "language": "docker"
