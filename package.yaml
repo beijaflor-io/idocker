@@ -1,0 +1,31 @@
+name: ipython-docker
+version: '0.1.0.0'
+author: Pedro Tacla Yamada
+maintainer: tacla.yamada@gmail.com
+license: MIT
+extra-source-files:
+- ChangeLog.md
+dependencies:
+- base >=4.9 && <4.10
+- language-dockerfile
+- zeromq4-haskell
+- aeson
+- bytestring
+- unordered-containers
+- text
+- lifted-base
+- aeson-qq
+- lens-aeson
+- convertible
+- cryptonite
+- time
+- uuid
+- mtl
+- process
+- monad-control
+- lens
+ghc-options: -threaded
+executables:
+  ipython-docker:
+    main: Main.hs
+    source-dirs: src
