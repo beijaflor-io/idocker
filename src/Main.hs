@@ -47,55 +47,76 @@ data ExecutionState =
 
 replMain :: IO ()
 replMain = do
-    _ <- runStateT runRepl (ReplState Nothing [] 0)
+    _ <- runStateT runRepl (ReplState Nothing [])
     return ()
 
 data ReplState = ReplState { containerId :: Maybe String
-                           , replDockerfile :: Dockerfile
-                           , replInstructionCount :: Int
+                           , replDockerfile :: [(String, InstructionPos)]
                            }
 type ReplM m = (MonadError IOException m, MonadBaseControl IO m, MonadState ReplState m, MonadIO m)
 
 data ReplCommand = ReplCommandDockerfile
+                 | ReplCommandGoto Int
                  | ReplCommandExit
                  | ReplCommandFlush
                  | ReplCommandEOL
                  | ReplCommandInstruction InstructionPos
 
+replInstructionCount = length . replDockerfile
+
 runRepl :: ReplM m => m ()
 runRepl = do
   run `catchError` (\e -> liftIO (print e))
-  modify (\s -> s { replInstructionCount = replInstructionCount s + 1 })
   runRepl
   where
+    prettyPrint' = prettyPrint . map snd
     run = readCommand >>= executeCommand
     readCommand :: ReplM m => m ReplCommand
     readCommand = do
       iCount <- replInstructionCount <$> get
+      currentSha <- do
+          df <- replDockerfile <$> get
+          case df of
+              (_:_) -> return (fst (last df))
+              [] -> return "<none>"
       ln <-
         liftIO $ do
           putStrLn ""
-          putStr ("  [" <> show iCount <> "] ")
+          putStr ("  [" <> show iCount <> "@" <> currentSha <> "] ")
           hFlush stdout
           ln <- getLine
           putStrLn ""
           return ln
-      let einstructions = Dockerfile.parseString (ln)
+      let einstructions = Dockerfile.parseString ln
       case einstructions of
         Left err -> do
-            liftIO $ print err
-            case ln of
-              "DOCKERFILE" -> return ReplCommandDockerfile
-              "FLUSH" -> return ReplCommandFlush
-              "EXIT" -> return ReplCommandExit
+            -- liftIO $ print err
+            case words ln of
+              ["GOTO", ln] -> return (ReplCommandGoto (read ln))
+              ["DOCKERFILE"] -> return ReplCommandDockerfile
+              ["FLUSH"] -> return ReplCommandFlush
+              ["EXIT"] -> return ReplCommandExit
               _ -> return (ReplCommandInstruction (InstructionPos (Run (words ln)) "Dockerfile" 0))
         Right (i:_) -> do
           return (ReplCommandInstruction i)
         _ -> return ReplCommandEOL
     executeCommand :: ReplM m => ReplCommand -> m ()
+    executeCommand (ReplCommandGoto i) = do
+        liftIO $ putStrLn "Stopping running container..."
+        executeCommand ReplCommandExit
+        liftIO $ putStrLn "Recreating..."
+        s@ReplState{..} <- get
+        let df = take i replDockerfile
+        let (sha, _) = last df
+        cid <- liftIO (readProcess "docker" [ "run", "-dit", sha ] "")
+        put (s { replDockerfile = df
+               , containerId = Just (head (lines cid))
+               })
     executeCommand (ReplCommandInstruction i) = do
-      modify (\s -> s { replDockerfile = replDockerfile s ++ [i] })
-      executeInstruction i
+      msha <- executeInstruction i
+      case msha of
+          Just sha -> modify (\s -> s { replDockerfile = replDockerfile s ++ [(drop (length ("sha256:" :: String)) (head (lines sha)), i)] })
+          Nothing -> return ()
     executeCommand ReplCommandEOL = return ()
     executeCommand ReplCommandExit = do
       mcontainerId <- containerId <$> get
@@ -108,13 +129,14 @@ runRepl = do
           _ -> return ()
     executeCommand ReplCommandFlush = do
       state <- replDockerfile <$> get
-      let df = prettyPrint state
+      let df = prettyPrint' state
       liftIO $ writeFile "./Dockerfile" df
     executeCommand ReplCommandDockerfile = do
       state <- replDockerfile <$> get
-      liftIO $ putStrLn (prettyPrint state)
-    executeInstruction :: ReplM m => InstructionPos -> m ()
-    executeInstruction (InstructionPos i _ _) =
+      liftIO $ putStrLn (prettyPrint' state)
+    executeInstruction :: ReplM m => InstructionPos -> m (Maybe String)
+    executeInstruction ip@(InstructionPos i _ _) = do
+      liftIO $ putStrLn (prettyPrint [ip])
       case i of
         From (UntaggedImage img) -> do
           state <- containerId <$> get
@@ -138,6 +160,11 @@ runRepl = do
               liftIO $ callProcess "docker" (["cp", src, containerId <> ":" <> dest])
             Nothing -> error "Please start a container"
         _ -> liftIO $ putStrLn "Not implemented"
+      state <- containerId <$> get
+      case state of
+        Just containerId -> do
+          liftIO $ Just <$> readProcess "docker" ([ "commit", containerId ]) ""
+        _ -> return Nothing
 
 main :: IO ()
 main = do
