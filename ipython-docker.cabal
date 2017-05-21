@@ -18,7 +18,7 @@ executable ipython-docker
   main-is: Main.hs
   build-depends:
       base >=4.9 && <4.10
-    , language-dockerfile
+    , language-dockerfile >=0.3.6.0
     , zeromq4-haskell
     , aeson
     , bytestring
@@ -35,8 +35,16 @@ executable ipython-docker
     , process
     , monad-control
     , lens
+    , ansi-terminal
+    , persistent
+    , persistent-sqlite
+    , haskeline
+    , stm
   other-modules:
       Configuration
+      Interpreter
+      Kernel
+      Repl
   hs-source-dirs:
       src
   ghc-options: -threaded

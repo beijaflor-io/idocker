@@ -7,7 +7,7 @@ extra-source-files:
 - ChangeLog.md
 dependencies:
 - base >=4.9 && <4.10
-- language-dockerfile
+- language-dockerfile >=0.3.6.0
 - zeromq4-haskell
 - aeson
 - bytestring
@@ -24,6 +24,11 @@ dependencies:
 - process
 - monad-control
 - lens
+- ansi-terminal
+- persistent
+- persistent-sqlite
+- haskeline
+- stm
 ghc-options: -threaded
 executables:
   ipython-docker:
