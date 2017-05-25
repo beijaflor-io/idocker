@@ -14,8 +14,11 @@ cabal-version:       >= 1.10
 extra-source-files:
     ChangeLog.md
 
-executable ipython-docker
+executable idocker
   main-is: Main.hs
+  hs-source-dirs:
+      src
+  ghc-options: -threaded
   build-depends:
       base >=4.9 && <4.10
     , language-dockerfile >=0.3.6.0
@@ -45,7 +48,4 @@ executable ipython-docker
       Interpreter
       Kernel
       Repl
-  hs-source-dirs:
-      src
-  ghc-options: -threaded
   default-language: Haskell2010

@@ -9,40 +9,30 @@ module Kernel
 
 import           Control.Concurrent.Lifted
 import           Control.Concurrent.STM
-import           Control.Exception           (IOException (..),
-                                              SomeException (..))
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Except
-import           Control.Monad.IO.Class
-import           Control.Monad.State
-import           Control.Monad.Trans.Control
-import qualified Crypto.Hash.Algorithms      as Crypto
-import qualified Crypto.MAC.HMAC             as Crypto
-import qualified Data.Aeson                  as Aeson
-import qualified Data.Aeson.Lens             as Aeson
+import qualified Crypto.Hash.Algorithms    as Crypto
+import qualified Crypto.MAC.HMAC           as Crypto
+import qualified Data.Aeson                as Aeson
+import qualified Data.Aeson.Lens           as Aeson
 import           Data.Aeson.QQ
-import qualified Data.ByteString             as ByteString
-import qualified Data.ByteString.Char8       as Char8
-import qualified Data.ByteString.Lazy        as ByteStringL
+import qualified Data.ByteString           as ByteString
+import qualified Data.ByteString.Char8     as Char8
+import qualified Data.ByteString.Lazy      as ByteStringL
 import           Data.Convertible
-import qualified Data.HashMap.Strict         as HashMap
 import           Data.Monoid
-import qualified Data.Text                   as Text
+import qualified Data.Text                 as Text
 import           Data.Time
 import           Data.UUID
 import           Data.UUID.V4
-import           GHC.Exts                    (fromList)
-import           Language.Dockerfile         as Dockerfile
-import           Prelude                     hiding (log)
-import           System.Console.ANSI
-import           System.Console.Haskeline
-import           System.Environment
+import           GHC.Exts                  (fromList)
+import           Language.Dockerfile       as Dockerfile
+import           Prelude                   hiding (log)
 import           System.IO
-import           System.Process
 import           System.ZMQ4.Monadic
 
-import           Configuration               hiding (key)
+import           Configuration
 import           Interpreter
 
 type CommandChannel = TChan InterpreterCommand
@@ -58,17 +48,18 @@ data KernelSocket s t = KernelSocket { ksSocket :: Socket s t
                                      }
 
 initialize :: [String] -> IO (Maybe Configuration)
+initialize [] = return Nothing
 initialize (connectionFile:_) = do
   hSetBuffering stdout LineBuffering
   hSetBuffering stderr LineBuffering
-  Aeson.decode <$> (ByteStringL.readFile connectionFile)
+  Aeson.decode <$> ByteStringL.readFile connectionFile
 
 ipythonMain :: [String] -> IO ()
 ipythonMain args = do
   Just cnf@Configuration {..} <- initialize args
   print cnf
   runZMQ $ do
-    let buildAddr port = "tcp://" <> Text.unpack ip <> ":" <> show port
+    let buildAddr p = "tcp://" <> Text.unpack ip <> ":" <> show p
         makeSocket stype sport = do
           s <- socket stype
           bind s $ buildAddr sport
@@ -79,17 +70,17 @@ ipythonMain args = do
     iopubSocket <- makeSocket Pub iopub_port
     shellSocket <- makeSocket Router shell_port
     hbSocket <- makeSocket Rep hb_port
-    hbThread <-
+    _hbThread <-
       fork $ forever $ do
         h <- receive hbSocket
         liftIO $ log "heartbeat" "Received Heartbeat"
         send hbSocket [] h
-    controlThread <-
+    _controlThread <-
       fork $ forever $ do
         h <- receive controlSocket
         liftIO $ log "control" (show h)
         send controlSocket [] h
-    shellThread <-
+    _shellThread <-
       fork $ forever $ do
         msg@Message {..} <- receive' shellSocket
         case msgHeader ^. Aeson.key "msg_type" . Aeson._String of
@@ -100,9 +91,10 @@ ipythonMain args = do
               cnf
           "kernel_info_request" -> do
             liftIO $ log "shell" ("Kernel Info Request - " <> show msg)
-            sendMessage shellSocket $
+            sendMessage shellSocket
               SendMessage
               { sendMessage_level = "shell"
+              , sendMessage_key = key
               , sendMessage_type = "kernel_info_reply"
               , sendMessage_parentIdentities = msgId
               , sendMessage_parentHeader = msgHeader
@@ -128,16 +120,17 @@ ipythonMain args = do
                         "banner": ""
                         }
                                                             |]
-              , sendMessage_metadata = (Aeson.object [])
+              , sendMessage_metadata = Aeson.object []
               }
           _ -> liftIO $ log "shell" "No parse"
-    forever $ do
+    _ <- forever $ do
       h <- receive stdinSocket
       liftIO $ log "stdin" (show h)
     return ()
 
+receive' :: Receiver t => Socket z t -> ZMQ z Message
 receive' s = do
-    (uuid : delim : sig : header : parentHeader : metadata : content : blobs) <- receiveMulti s
+    (uuid : delim : _sig : header : parentHeader : metadata : content : blobs) <- receiveMulti s
     return Message { msgHeader = let Just h = Aeson.decodeStrict header in h
                    , msgId = uuid
                    , msgDelim = delim
@@ -146,21 +139,16 @@ receive' s = do
                    , msgContent = let Just h = Aeson.decodeStrict content in h
                    , msgBlobs = blobs
                    }
-  where
-    loop delim acc = do
-        p <- receive s
-        if p == delim
-            then return acc
-            else loop delim (acc ++ [p])
 
+log :: String -> String -> IO ()
 log l m = putStrLn ("[" <> l <> "] " <> m)
 
 sign :: ByteString.ByteString -> [ByteString.ByteString] -> ByteString.ByteString
 sign key list =
   Char8.pack $
   show $
-  Crypto.hmacGetDigest $
-  (Crypto.hmac key (ByteString.concat list) :: Crypto.HMAC Crypto.SHA256)
+  Crypto.hmacGetDigest
+    (Crypto.hmac key (ByteString.concat list) :: Crypto.HMAC Crypto.SHA256)
 
 data SendMessage = SendMessage { sendMessage_key :: Text.Text
                                , sendMessage_level :: String
@@ -172,6 +160,7 @@ data SendMessage = SendMessage { sendMessage_key :: Text.Text
                                , sendMessage_type :: Text.Text
                                }
 
+sendMessage :: Sender t => Socket z t -> SendMessage -> ZMQ z ()
 sendMessage s SendMessage{..} = do
   liftIO $ do
     log sendMessage_level ("Sending message " <> show sendMessage_message)
@@ -197,7 +186,8 @@ sendMessage s SendMessage{..} = do
           , ByteStringL.toStrict $ Aeson.encode sendMessage_metadata
           , ByteStringL.toStrict $ Aeson.encode sendMessage_message
           ]
-  let parts =
+
+  let ps =
         [ sendMessage_parentIdentities
         , sendMessage_parentDelim
         , signature
@@ -206,10 +196,12 @@ sendMessage s SendMessage{..} = do
         , ByteStringL.toStrict $ Aeson.encode sendMessage_metadata
         , ByteStringL.toStrict $ Aeson.encode sendMessage_message
         ]
+
   liftIO $ do
-    log sendMessage_level ("Sending parts " <> show parts)
+    log sendMessage_level ("Sending parts " <> show ps)
     hFlush stdout
-  sendMulti s $ fromList parts
+
+  sendMulti s $ fromList ps
 
 data Message =
     Message { msgHeader       :: Aeson.Value
@@ -222,6 +214,8 @@ data Message =
             }
   deriving(Show, Eq)
 
+executeRequest
+  :: Sender t => Socket z t -> Message -> Configuration -> ZMQ z ()
 executeRequest iopubSocket msg@Message {..} cnf@Configuration {..} = do
   liftIO $ print msgContent
   now <- liftIO getCurrentTime
@@ -236,12 +230,8 @@ executeRequest iopubSocket msg@Message {..} cnf@Configuration {..} = do
     msgId
     msgHeader
     msgDelim
-    [aesonQQ|
-{
-  "execution_state": "busy"
-}
-|]
-    (Aeson.object [])
+    [aesonQQ|{"execution_state": "busy"}|]
+    [aesonQQ|{}|]
   undefined -- sendMessage
     -- key
     iopubSocket
@@ -251,11 +241,11 @@ executeRequest iopubSocket msg@Message {..} cnf@Configuration {..} = do
     msgHeader
     msgDelim
     [aesonQQ|
-                                                                                          {
-                                                                                            "execution_count": 1,
-                                                                                            "code": #{msgContent ^. Aeson.key "code" . Aeson._String}
-                                                                                          }
-                                                                                          |]
+{
+  "execution_count": 1,
+  "code": #{msgContent ^. Aeson.key "code" . Aeson._String}
+}
+    |]
     (Aeson.object [])
   undefined -- sendMessage
     -- key
@@ -292,6 +282,7 @@ executeRequest iopubSocket msg@Message {..} cnf@Configuration {..} = do
     iopubSocket
     SendMessage
     { sendMessage_level = "iopub"
+    , sendMessage_key = key
     , sendMessage_type = "status"
     , sendMessage_parentIdentities = msgId
     , sendMessage_parentHeader = msgHeader
@@ -309,6 +300,7 @@ executeRequest iopubSocket msg@Message {..} cnf@Configuration {..} = do
     SendMessage
     { sendMessage_level = "shell"
     , sendMessage_type = "kernel_info_reply"
+    , sendMessage_key = key
     , sendMessage_parentIdentities = msgId
     , sendMessage_parentHeader = msgHeader
     , sendMessage_parentDelim = msgDelim

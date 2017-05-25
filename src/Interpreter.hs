@@ -32,6 +32,7 @@ import           Language.Dockerfile         as Dockerfile
 import           System.Console.ANSI
 import           System.Console.Haskeline
 import           System.Environment
+import           System.Exit
 import           System.IO
 import           System.Process
 import           System.ZMQ4.Monadic
@@ -79,7 +80,7 @@ prettyPrintII = prettyPrint . map snd
 executeInstruction
   :: MonadInterpreter m =>
      InstructionPos -> m ()
-executeInstruction ip@(InstructionPos i _ _) = run i
+executeInstruction _ip@(InstructionPos i _ _) = run i
   where
     run i =
       case i of
@@ -87,11 +88,21 @@ executeInstruction ip@(InstructionPos i _ _) = run i
           mcid <- containerId
           case mcid of
             Nothing -> do
+              (ec, out, _stderr) <-
+                liftIO
+                  (readProcessWithExitCode "docker" ["run", "-dit", img] "")
               cid <-
-                head . lines <$>
-                liftIO (readProcess "docker" ["run", "-dit", img] "")
+                case ec of
+                  ExitSuccess -> return (head (lines out))
+                  ExitFailure _ -> do
+                    liftIO $
+                      putStrLn
+                        "Couldn't start the base image interactively with no command"
+                    liftIO $ putStrLn "Trying to run sh"
+                    out' <-
+                      liftIO (readProcess "docker" ["run", "-dit", img] "sh")
+                    return (head (lines out'))
               liftIO (putStrLn ("Started: " <> cid))
-                    -- modify (\s -> s {containerId = (Just containerId)})
             Just _ -> error "Process running"
         Run args -> do
           mcid <- containerId

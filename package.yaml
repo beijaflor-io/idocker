@@ -31,6 +31,6 @@ dependencies:
 - stm
 ghc-options: -threaded
 executables:
-  ipython-docker:
+  idocker:
     main: Main.hs
     source-dirs: src
