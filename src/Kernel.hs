@@ -20,7 +20,7 @@ import           Control.Monad.Trans.Control
 import qualified Crypto.Hash.Algorithms      as Crypto
 import qualified Crypto.MAC.HMAC             as Crypto
 import qualified Data.Aeson                  as Aeson
-import           Data.Aeson.Lens
+import qualified Data.Aeson.Lens             as Aeson
 import           Data.Aeson.QQ
 import qualified Data.ByteString             as ByteString
 import qualified Data.ByteString.Char8       as Char8
@@ -92,118 +92,12 @@ ipythonMain args = do
     shellThread <-
       fork $ forever $ do
         msg@Message {..} <- receive' shellSocket
-        case msgHeader ^. Data.Aeson.Lens.key "msg_type" . _String of
-          "execute_request" -> do
-            liftIO $ print msgContent
-            now <- liftIO getCurrentTime
-            let instructions =
-                  Dockerfile.parseString
-                    (convert
-                       (msgContent ^. Data.Aeson.Lens.key "code" . _String))
-            sendMessage
-              key
+        case msgHeader ^. Aeson.key "msg_type" . Aeson._String of
+          "execute_request" ->
+            undefined -- executeRequest
               iopubSocket
-              "iopub"
-              "status"
-              msgId
-              msgHeader
-              msgDelim
-              [aesonQQ|
-                                                                                          {
-                                                                                            "execution_state": "busy"
-                                                                                          }
-                                                                                          |]
-              (Aeson.object [])
-            sendMessage
-              key
-              iopubSocket
-              "iopub"
-              "execute_input"
-              msgId
-              msgHeader
-              msgDelim
-              [aesonQQ|
-                                                                                          {
-                                                                                            "execution_count": 1,
-                                                                                            "code": #{msgContent ^. Data.Aeson.Lens.key "code" . _String}
-                                                                                          }
-                                                                                          |]
-              (Aeson.object [])
-            sendMessage
-              key
-              iopubSocket
-              "iopub"
-              "stream"
-              msgId
-              msgHeader
-              msgDelim
-              [aesonQQ|
-                                                                                          {
-                                                                                            "name": "stdout",
-                                                                                            "text": #{show instructions}
-                                                                                          }
-                                                                                          |]
-              (Aeson.object [])
-            sendMessage
-              key
-              iopubSocket
-              "iopub"
-              "execute_result"
-              msgId
-              msgHeader
-              msgDelim
-              [aesonQQ|
-                                                                                          {
-                                                                                            "execution_count": 1,
-                                                                                            "data": {"text/html": "<code>ok</code>"},
-                                                                                            "metadata": {}
-                                                                                          }
-                                                                                          |]
-              (Aeson.object [])
-            sendMessage
-              key
-              iopubSocket
-              "iopub"
-              "status"
-              msgId
-              msgHeader
-              msgDelim
-              [aesonQQ|
-                                                                                          {
-                                                                                            "execution_state": "idle"
-                                                                                          }
-                                                                                          |]
-              (Aeson.object [])
-            sendMessage
-              SendMessage
-              { sendMessage_level = "shell"
-              , sendMessage_type = "kernel_info_reply"
-              , sendMessage_parentIdentities = msgId
-              , sendMessage_parentHeader = msgHeader
-              , sendMessage_parentDelim = msgDelim
-              , sendMessage_message =
-                  [aesonQQ|
-                        {
-                        "protocol_version": "5.0",
-                        "ipython_version": [1, 1, 0, ""],
-                        "language_version": [0, 0, 1],
-                        "language": "docker",
-                        "implementation": "docker",
-                        "implementation_version": "1.1",
-                        "language_info": {
-                            "name": "simple_kernel",
-                            "version": "1.0",
-                            'mimetype': "",
-                            'file_extension': "",
-                            'pygments_lexer': "",
-                            'codemirror_mode': "dockerfile",
-                            'nbconvert_exporter': ""
-                        },
-                        "banner": ""
-                        }
-                                                            |]
-              , sendMessage_metadata = (Aeson.object [])
-              }
+              msg
+              cnf
           "kernel_info_request" -> do
             liftIO $ log "shell" ("Kernel Info Request - " <> show msg)
             sendMessage shellSocket $
@@ -290,14 +184,14 @@ sendMessage s SendMessage{..} = do
                             "date": #{now},
                             "msg_id": #{uuid},
                             "username": "kernel",
-                            "session": #{parentHeader ^. Data.Aeson.Lens.key "session" . _String},
+                            "session": #{sendMessage_parentHeader ^. Aeson.key "session" . Aeson._String},
                             "msg_type": #{sendMessage_type :: Text.Text},
                             "version": "3.0"
                             }
                             |]
       signature =
         sign
-          (convert key)
+          (convert sendMessage_key)
           [ ByteStringL.toStrict $ Aeson.encode header
           , ByteStringL.toStrict $ Aeson.encode sendMessage_parentHeader
           , ByteStringL.toStrict $ Aeson.encode sendMessage_metadata
@@ -327,3 +221,117 @@ data Message =
             , msgBlobs        :: [ByteString.ByteString]
             }
   deriving(Show, Eq)
+
+executeRequest iopubSocket msg@Message {..} cnf@Configuration {..} = do
+  liftIO $ print msgContent
+  now <- liftIO getCurrentTime
+  let instructions =
+        Dockerfile.parseString
+          (convert (msgContent ^. Aeson.key "code" . Aeson._String))
+  undefined -- sendMessage
+    -- key
+    iopubSocket
+    "iopub"
+    "status"
+    msgId
+    msgHeader
+    msgDelim
+    [aesonQQ|
+{
+  "execution_state": "busy"
+}
+|]
+    (Aeson.object [])
+  undefined -- sendMessage
+    -- key
+    iopubSocket
+    "iopub"
+    "execute_input"
+    msgId
+    msgHeader
+    msgDelim
+    [aesonQQ|
+                                                                                          {
+                                                                                            "execution_count": 1,
+                                                                                            "code": #{msgContent ^. Aeson.key "code" . Aeson._String}
+                                                                                          }
+                                                                                          |]
+    (Aeson.object [])
+  undefined -- sendMessage
+    -- key
+    iopubSocket
+    "iopub"
+    "stream"
+    msgId
+    msgHeader
+    msgDelim
+    [aesonQQ|
+                                                                                          {
+                                                                                            "name": "stdout",
+                                                                                            "text": #{show instructions}
+                                                                                          }
+                                                                                          |]
+    (Aeson.object [])
+  undefined -- sendMessage
+    -- key
+    iopubSocket
+    "iopub"
+    "execute_result"
+    msgId
+    msgHeader
+    msgDelim
+    [aesonQQ|
+                                                                                          {
+                                                                                            "execution_count": 1,
+                                                                                            "data": {"text/html": "<code>ok</code>"},
+                                                                                            "metadata": {}
+                                                                                          }
+                                                                                          |]
+    (Aeson.object [])
+  sendMessage
+    iopubSocket
+    SendMessage
+    { sendMessage_level = "iopub"
+    , sendMessage_type = "status"
+    , sendMessage_parentIdentities = msgId
+    , sendMessage_parentHeader = msgHeader
+    , sendMessage_parentDelim = msgDelim
+    , sendMessage_message =
+        [aesonQQ|
+                {
+                "execution_state": "idle"
+                }
+                |]
+    , sendMessage_metadata = (Aeson.object [])
+    }
+  sendMessage
+    iopubSocket
+    SendMessage
+    { sendMessage_level = "shell"
+    , sendMessage_type = "kernel_info_reply"
+    , sendMessage_parentIdentities = msgId
+    , sendMessage_parentHeader = msgHeader
+    , sendMessage_parentDelim = msgDelim
+    , sendMessage_message =
+        [aesonQQ|
+                {
+                "protocol_version": "5.0",
+                        "ipython_version": [1, 1, 0, ""],
+                        "language_version": [0, 0, 1],
+                        "language": "docker",
+                        "implementation": "docker",
+                        "implementation_version": "1.1",
+                        "language_info": {
+                            "name": "simple_kernel",
+                            "version": "1.0",
+                            'mimetype': "",
+                            'file_extension': "",
+                            'pygments_lexer': "",
+                            'codemirror_mode': "dockerfile",
+                            'nbconvert_exporter': ""
+                        },
+                        "banner": ""
+                        }
+                        |]
+    , sendMessage_metadata = (Aeson.object [])
+    }
